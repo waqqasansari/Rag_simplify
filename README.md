@@ -7,13 +7,15 @@ This repository contains a Django REST Framework project that enables users to u
 ### Installation
 
 1. Clone the repository: `https://github.com/waqqasansari/Rag_simplify.git`
-2. Navigate to the project directory: `cd task_simplyfy/`
+2. Navigate to the project directory: `cd Rag_simplify/`
 3. Create a virtual environment: `python3 -m venv .venv`
-4. Activate the virtual environment: `.venv\Scripts\activate`
-5. Install dependencies: `pip install -r requirements.txt`
-6. Run migrations: `python manage.py makemigrations`
-7. Apply database migrations: `python manage.py migrate`
-8. Run the development server: `python manage.py runserver`
+4. Create a .env file where add `OPENAI_API_KEY`
+5. Activate the virtual environment: `.venv\Scripts\activate`
+6. Install dependencies: `pip install -r requirements.txt`
+7. Navigate to the project directory: `cd task_simplyfy/`
+8. Run migrations: `python manage.py makemigrations`
+9. Apply database migrations: `python manage.py migrate`
+10. Run the development server: `python manage.py runserver`
 
 ### Chat with PDF
 
