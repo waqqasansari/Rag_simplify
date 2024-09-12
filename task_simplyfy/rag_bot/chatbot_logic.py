@@ -1,137 +1,115 @@
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+# from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
-import time
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
 from langchain import OpenAI, PromptTemplate
-from langchain.chains.question_answering import load_qa_chain
+from langchain_openai import ChatOpenAI
+from PyPDF2 import PdfReader
 from langchain.embeddings import OpenAIEmbeddings
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-import os
-# from langchain_pinecone import PineconeVectorStore
-
-# from pinecone import Pinecone, ServerlessSpec
-# from google.colab import userdata
+import time
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_community.vectorstores import FAISS
 import time
 import markdown
 
 class ChatbotLogic:
     def __init__(self):
         load_dotenv()
-        self.openai_api_key = userdata.get('OPENAI_API_KEY')
-        self.pinecone_api_key = userdata.get('PINECONE_API_KEY')
-        self.index_name = "testingpinecone"
+        self.openai_api_key = os.environ.get('OPENAI_API_KEY')
 
-        os.environ["OPENAI_API_KEY"] = self.openai_api_key
-        os.environ["PINECONE_API_KEY"] = self.pinecone_api_key
+        # Initialize OpenAI LLM
+        # self.llm = OpenAI(api_key=self.openai_api_key, model_name="gpt-3.5-turbo-instruct")
+        self.llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
-        self.docsearch = None
+        print("Loading and processing PDF...")
+        # Load the PDF and extract text
+        pdf_file_path = "D:/task-simplyfyai/task_simplyfy/room-finder-company-info.pdf"
+        pdf_reader = PdfReader(pdf_file_path)
+        self.docs = ""
+        for page in pdf_reader.pages:
+            self.docs += page.extract_text()
 
-    def initialize(self, pdf_docs):
-        print("Initializing document search...")
-        raw_text = self.get_pdf_text(pdf_docs)
-        text_chunks = self.get_text_chunks(raw_text)
-        self.docsearch = self.get_vector_store(text_chunks)
-        print("Document search initialized successfully.")
+        print("Initializing embeddings and text splitting...")
+        self.embeddings = OpenAIEmbeddings()
+        self.text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        self.splits = self.text_splitter.split_text(self.docs)
 
-    def get_pdf_text(self, pdf_docs):
-        print("Extracting text from PDFs...")
-        text = ""
-        for pdf in pdf_docs:
-            pdf_reader = PdfReader(pdf)
-            for page in pdf_reader.pages:
-                text += page.extract_text()
-        print("Text extraction complete.")
-        return text
+        print("Setting up FAISS index...")
+        self.vectorstore = FAISS.from_texts(texts=self.splits, embedding=self.embeddings)
+        self.retriever = self.vectorstore.as_retriever()
 
-    def get_text_chunks(self, text):
-        print("Splitting text into chunks...")
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=300)
-        text_chunks = text_splitter.split_text(text)
-        print(f"Text split into {len(text_chunks)} chunks.")
-        return text_chunks
-
-    def get_vector_store(self, text_chunks):
-        print("Setting up vector store...")
-        embeddings = OpenAIEmbeddings()
-        pc = Pinecone(api_key=self.pinecone_api_key)
-
-        if self.index_name not in pc.list_indexes():
-            print(f"Creating index '{self.index_name}'...")
-            try:
-                pc.create_index(
-                    name=self.index_name,
-                    dimension=1536,
-                    metric="cosine",
-                    spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-                )
-                while not pc.describe_index(self.index_name).status["ready"]:
-                    time.sleep(1)
-                print("Index creation complete.")
-            except:
-                print("Index creation failed.")
-
-        index = pc.Index(self.index_name)
-        print(index.describe_index_stats())
-        docsearch = PineconeVectorStore.from_texts(text_chunks, embeddings, index_name=self.index_name)
         print("Vector store setup complete.")
-        print(docsearch)
-        return docsearch
+        self.setup_chains()
 
-    def get_conversational_chain(self):
-        print("Initializing conversational chain...")
-        prompt_template = """
-        Act as a chatbot (virtual assistance) and your name is Tom.
-        Understand what the user wants and answer their questions based on the Context in a helpful way.
-        Keep the conversation flowing and feel natural, like talking to a friend.
-        If you're not sure, just say that you don't know the answer, don't try to make up an answer.\n\n
+        # Dictionary to store chat session histories
+        self.store = {}
 
-        Note if the Question is Greeting then Answer like this.
-        Greeting: Hello
-        Answer: Hello! How can I help you today?
+    def setup_chains(self):
+        # System prompt to contextualize questions
+        self.contextualize_q_system_prompt = """Given a chat history and the latest user question \
+                                                which might reference context in the chat history, formulate a standalone question \
+                                                which can be understood without the chat history. Do NOT answer the question, \
+                                                just reformulate it if needed and otherwise return it as is."""
 
-        Greeting: Hi
-        Answer: Hi! What would you like to chat about?
+        self.contextualize_q_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.contextualize_q_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
 
-        Greeting: Hey there
-        Answer: Hey there! What's on your mind?
+        # Combine chat history with retriever for question answering
+        self.history_aware_retriever = create_history_aware_retriever(
+            self.llm, self.retriever, self.contextualize_q_prompt
+        )
 
-        Greeting: Good morning/afternoon/evening
-        Answer: Good [morning/afternoon/evening]! What can I do for you?
+        # System prompt for question answering with retrieved context
+        self.qa_system_prompt =  """You are an assistant for question-answering tasks. \
+                                    Use the following pieces of retrieved context to answer the question. \
+                                    If you don't know the answer, just say that you don't know. \
+                                    Use three sentences maximum and keep the answer concise.\
 
-        Greeting: How are you?
-        Answer: I'm doing well, thank you for asking! How about you?
+                                    {context}"""
+        
+        self.qa_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", self.qa_system_prompt),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+        
+        self.question_answer_chain = create_stuff_documents_chain(self.llm, self.qa_prompt)
 
-        Greeting: What's up? (informal)
-        Answer: Not much, just hanging out in the digital world. What can I help you with?
+        self.rag_chain = create_retrieval_chain(
+            self.history_aware_retriever, self.question_answer_chain
+        )
 
-        If the Question is not a Greeting then you can avoid a greeting altogether and jump right into addressing the Question.
+    def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
+        """Manage session-based chat history"""
+        if session_id not in self.store:
+            self.store[session_id] = ChatMessageHistory()
+        return self.store[session_id]
 
-        Context:\n {context}?\n
-        Question: \n{question}\n
-        """
+    def process_message(self, session_id: str, user_input: str) -> str:
+        """Process user input, retrieve relevant context, and maintain conversation memory."""
+        conversational_rag_chain = RunnableWithMessageHistory(
+            self.rag_chain,
+            self.get_session_history,
+            input_messages_key="input",
+            history_messages_key="chat_history",
+            output_messages_key="answer",
+        )
 
-        model = OpenAI(api_key=self.openai_api_key, model_name="gpt-3.5-turbo-instruct")
-        prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-        chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-        print("Conversational chain initialized.")
-        return chain
-
-    def user_input(self, user_question):
-        print("Handling user input...")
-        if not self.docsearch:
-            raise ValueError("Document search index not initialized. Call initialize() first.")
-
-        docs = self.docsearch.similarity_search(user_question)
-        print(f"Found {len(docs)} documents related to the user's question.")
-        print("docs ", docs)
-
-        chain = self.get_conversational_chain()
-        response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-        markdown_text = response['output_text']
-
-        # Render the markdown using a dedicated library like `markdown`
-        html_content = markdown.markdown(markdown_text)
-        print("User input handled successfully.")
-        return html_content
+        response = conversational_rag_chain.invoke(
+            {"input": user_input},
+            config={"configurable": {"session_id": session_id}},
+        )
+        return response
